@@ -6,8 +6,10 @@ CREATE TABLE IF NOT EXISTS `mod_hotspot` (
   `z` FLOAT NOT NULL,
   `radius` FLOAT NOT NULL DEFAULT 50.0,
   `xp_multiplier` FLOAT NOT NULL DEFAULT 3.0,
-  `respawn_multiplier` FLOAT NOT NULL DEFAULT 0.2,
+  `respawn_multiplier` FLOAT NOT NULL DEFAULT 0.05,
   `type` TINYINT NOT NULL DEFAULT 1,
   `active` TINYINT(1) NOT NULL DEFAULT 1,
+  `creature_entry` INT NOT NULL DEFAULT 0,
+  `max_population` INT NOT NULL DEFAULT 10,
   `comment` VARCHAR(255) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
