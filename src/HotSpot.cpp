@@ -9,6 +9,7 @@
 #include "WorldSession.h"
 #include "Unit.h"
 #include "Map.h"
+#include "LootMgr.h"
 #include <vector>
 #include <mutex>
 #include <algorithm>
@@ -258,19 +259,75 @@ public:
     }
 };
 
+// Helper para obtener pociones según el nivel
+uint32 GetPotionEntryForLevel(uint8 level)
+{
+    if (level <= 10) return 118;   // Poción de vida menor
+    if (level <= 20) return 858;   // Poción de vida inferior
+    if (level <= 30) return 929;   // Poción de vida
+    if (level <= 40) return 1710;  // Poción de vida superior
+    if (level <= 50) return 3928;  // Poción de vida excelente
+    if (level <= 60) return 13446; // Poción de vida mayor
+    if (level <= 70) return 22829; // Poción de vida súper
+    return 33447;                  // Poción de vida rúnica (80)
+}
+
+// Helper para obtener paños según el nivel
+uint32 GetClothEntryForLevel(uint8 level)
+{
+    if (level <= 10) return 2589;   // Paño de lino
+    if (level <= 20) return 2592;   // Paño de lana
+    if (level <= 30) return 4306;   // Paño de seda
+    if (level <= 45) return 4338;   // Paño de tejido mágico
+    if (level <= 55) return 14047;  // Paño de runas
+    if (level <= 70) return 21877;  // Paño de tejido abisal
+    return 33470;                  // Paño de tejido de escarcha (80)
+}
+
 class HotSpotUnitScript : public UnitScript
 {
 public:
     HotSpotUnitScript() : UnitScript("HotSpotUnitScript") {}
 
-    void OnUnitDeath(Unit* unit, Unit*) override
+    void OnUnitDeath(Unit* unit, Unit* killer) override
     {
         Creature* creature = unit->ToCreature();
         if (!creature || !creature->IsSummon()) return;
 
         HotSpotData spot;
         if (HotSpotMgr::instance()->GetHotSpotAt(creature->GetMapId(), creature->GetPositionX(), creature->GetPositionY(), creature->GetPositionZ(), spot, 1))
+        {
+            // Forzar delay del cuerpo
             creature->SetCorpseDelay(3);
+
+            // --- SISTEMA DE LOOT DINÁMICO ---
+            Player* player = killer ? killer->ToPlayer() : nullptr;
+            if (!player) return;
+
+            uint8 level = player->GetLevel();
+
+            // Limpiar loot previo para asegurar que solo caiga lo escalado
+            creature->loot.clear();
+
+            // 1. Dinero escalado (Nivel^2 * 15 cobres)
+            uint32 money = (level * level) * 15;
+            creature->loot.gold = money;
+
+            // 2. Inyectar ítems directamente al loot de la criatura
+            // Pociones (30% de probabilidad)
+            if (urand(1, 100) <= 30)
+            {
+                uint32 potionId = GetPotionEntryForLevel(level);
+                creature->loot.AddItem(LootStoreItem(potionId, 0, 100.0f, false, 0, 0, 1, 1));
+            }
+
+            // Paños (40% de probabilidad, suelta 1-3)
+            if (urand(1, 100) <= 40)
+            {
+                uint32 clothId = GetClothEntryForLevel(level);
+                creature->loot.AddItem(LootStoreItem(clothId, 0, 100.0f, false, 0, 0, 1, 3));
+            }
+        }
     }
 };
 
