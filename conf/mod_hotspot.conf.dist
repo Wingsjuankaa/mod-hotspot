@@ -1,0 +1,16 @@
+[conf]
+conf_version=2024032301
+
+#
+# HotSpot.Enable
+# Modulo de Hot Spots (Zonas de experiencia y respawn acelerado)
+# Default: 1 (Activado)
+#
+HotSpot.Enable = 1
+
+#
+# HotSpot.AnnounceOnLogin
+# Anunciar al jugador al entrar si el modulo esta activo
+# Default: 1
+#
+HotSpot.AnnounceOnLogin = 1
