@@ -666,6 +666,42 @@ class HotSpotPlayerScript : public PlayerScript
 public:
     HotSpotPlayerScript() : PlayerScript("HotSpotPlayerScript") {}
 
+    // Envía un marcador SMSG_GOSSIP_POI al cliente para que aparezca
+    // en el mapa mundial (al abrir M) mientras el jugador está en el spot.
+    static void SendHotSpotMapMarker(Player* player, const HotSpotData& spot)
+    {
+        uint32 icon;
+        std::string label;
+        switch (spot.type)
+        {
+            case HOTSPOT_TYPE_INVASION:
+                icon  = 7;
+                label = "¡Zona de Invasión!";
+                break;
+            case HOTSPOT_TYPE_MINING:
+                icon  = 7;
+                label = "Zona de Minería";
+                break;
+            case HOTSPOT_TYPE_HERB:
+                icon  = 7;
+                label = "Zona de Herboristería";
+                break;
+            default:
+                icon  = 7;
+                label = "Hot Spot";
+                break;
+        }
+
+        WorldPacket data(SMSG_GOSSIP_POI, 4 + 4 + 4 + 4 + 4 + label.size() + 1);
+        data << uint32(6);       // Flags: 6 = marcador visible y persistente en el mapa
+        data << float(spot.x);  // coordenada X del mundo
+        data << float(spot.y);  // coordenada Y del mundo
+        data << uint32(icon);   // icono (7 = punto amarillo, el más usado en POIs)
+        data << uint32(0);      // importancia (tamaño del icono, 0 = normal)
+        data << label;
+        player->GetSession()->SendPacket(&data);
+    }
+
     // Liberar timers cuando el jugador desconecta
     void OnPlayerLogout(Player* player) override
     {
@@ -698,6 +734,7 @@ public:
             if (!player->HasAura(SPELL_HOTSPOT_XP))
             {
                 player->CastSpell(player, SPELL_HOTSPOT_XP, true);
+                SendHotSpotMapMarker(player, spot);
                 std::string msg = Acore::StringFormat(
                     "|cffffff00¡INVASIÓN DETECTADA!|r\n|cff00ff00Sobrevive y gana x{:.1f} XP.|r",
                     spot.xp_mult);
@@ -813,6 +850,7 @@ public:
                 uint32 spellId = (spotGO.type == HOTSPOT_TYPE_MINING)
                     ? SPELL_HOTSPOT_MINING : SPELL_HOTSPOT_HERB;
                 player->CastSpell(player, spellId, true);
+                SendHotSpotMapMarker(player, spotGO);
 
                 const char* zoneName   = (spotGO.type == HOTSPOT_TYPE_MINING)
                     ? "MINERÍA" : "HERBORISTERÍA";
