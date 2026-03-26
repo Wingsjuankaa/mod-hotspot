@@ -37,15 +37,16 @@ struct HotSpotData
 {
     uint32 id;
     uint32 map_id;
-    uint32 zone_id; // ZoneId de la zona donde se creó el spot (0 = no definido)
+    uint32 zone_id;
     float x, y, z, radius;
     float xp_mult;
     float respawn_mult;
     uint8 type;
     uint32 creature_entry;
     uint32 max_population;
-    uint32 gameobject_entry; // Tipos 2/3: 0 = auto (scan de zona o nivel de jugador).
-    std::vector<uint32> goVariants; // Entries reales de la zona (scan al cargar).
+    uint32 gameobject_entry;
+    std::vector<uint32> goVariants;
+    bool active; // true = el spot está activo y spawnea contenido
 };
 
 class HotSpotMgr
@@ -60,8 +61,9 @@ public:
 
         QueryResult result = WorldDatabase.Query(
             "SELECT id, map_id, zone_id, x, y, z, radius, xp_multiplier, "
-            "respawn_multiplier, type, creature_entry, max_population, gameobject_entry "
-            "FROM mod_hotspot WHERE active = 1");
+            "respawn_multiplier, type, creature_entry, max_population, "
+            "gameobject_entry, active "
+            "FROM mod_hotspot");
         if (!result) return;
 
         // Listas de entries de GOs conocidos para scan de mapa.
@@ -104,9 +106,10 @@ public:
             data.creature_entry  = fields[10].Get<uint32>();
             data.max_population  = fields[11].Get<uint32>();
             data.gameobject_entry = fields[12].Get<uint32>();
+            data.active           = fields[13].Get<bool>();
 
-            // Scan de zona: si no hay entry fijo, detectar variedad real de recursos.
-            // Usa ZoneId exacto si está disponible; bounding-box 1500u como fallback.
+            // Scan de zona: para todos los spots con entry automático (activos o no),
+            // así un spot inactivo que se active en caliente ya tiene sus variantes listas.
             if (data.gameobject_entry == 0 &&
                 (data.type == HOTSPOT_TYPE_MINING || data.type == HOTSPOT_TYPE_HERB))
             {
@@ -162,7 +165,7 @@ public:
         std::lock_guard<std::mutex> lock(_mutex);
         for (const auto& spot : hotspots)
         {
-            if (spot.map_id == mapId && (type == 0 || spot.type == type))
+            if (spot.map_id == mapId && (type == 0 || spot.type == type) && spot.active)
             {
                 float dx = spot.x - x, dy = spot.y - y, dz = spot.z - z;
                 if ((dx*dx + dy*dy + dz*dz) <= spot.radius * spot.radius)
@@ -213,6 +216,22 @@ public:
             if (s.map_id == mapId)
                 result.push_back(s);
         return result;
+    }
+
+    // Activa o desactiva un spot en memoria (para .hotspot enable/disable).
+    // Devuelve false si el ID no existe.
+    bool SetActive(uint32 id, bool active)
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        for (auto& s : hotspots)
+        {
+            if (s.id == id)
+            {
+                s.active = active;
+                return true;
+            }
+        }
+        return false;
     }
 
 private:
@@ -316,13 +335,19 @@ public:
             else
                 entryInfo = "|cffff8800[fallback nivel]|r";
 
+            // Indicador de estado: verde ON / rojo OFF
+            const char* stateStr = s.active
+                ? "|cff00ff00[ON] |r"
+                : "|cffff4444[OFF]|r";
+
             std::string line;
             if (showMap)
                 line = Acore::StringFormat(
-                    " {}[{}]|r  {}{} |r"
+                    " {}  {}[{}]|r  {}{} |r"
                     "  Mapa:|cff00ccff{}|r Zona:|cff00ccff{}|r"
                     "  |cffffffff({:.0f},{:.0f},{:.0f})|r"
                     "  R:{}{:.0f}|r  Pop:{}{} |r  {}",
+                    stateStr,
                     TypeColor(s.type), s.id,
                     TypeColor(s.type), TypeLabel(s.type),
                     s.map_id, s.zone_id,
@@ -332,10 +357,11 @@ public:
                     entryInfo);
             else
                 line = Acore::StringFormat(
-                    " {}[{}]|r  {}{} |r"
+                    " {}  {}[{}]|r  {}{} |r"
                     "  Zona:|cff00ccff{}|r"
                     "  |cffffffff({:.0f},{:.0f},{:.0f})|r"
                     "  R:{}{:.0f}|r  Pop:{}{} |r  {}",
+                    stateStr,
                     TypeColor(s.type), s.id,
                     TypeColor(s.type), TypeLabel(s.type),
                     s.zone_id,
@@ -357,11 +383,13 @@ public:
             { "",     HandleHotSpotListAllCommand,  SEC_ADMINISTRATOR, Console::Yes },
         };
         static ChatCommandTable hotSpotCommandTable = {
-            { "add",    HandleHotSpotAddCommand,    SEC_ADMINISTRATOR, Console::No  },
-            { "delete", HandleHotSpotDeleteCommand, SEC_ADMINISTRATOR, Console::No  },
-            { "reload", HandleHotSpotReloadCommand, SEC_ADMINISTRATOR, Console::No  },
-            { "go",     HandleHotSpotGoCommand,     SEC_ADMINISTRATOR, Console::No  },
-            { "list",   hotSpotListCommandTable                                      },
+            { "add",     HandleHotSpotAddCommand,     SEC_ADMINISTRATOR, Console::No  },
+            { "delete",  HandleHotSpotDeleteCommand,  SEC_ADMINISTRATOR, Console::No  },
+            { "enable",  HandleHotSpotEnableCommand,  SEC_ADMINISTRATOR, Console::No  },
+            { "disable", HandleHotSpotDisableCommand, SEC_ADMINISTRATOR, Console::No  },
+            { "reload",  HandleHotSpotReloadCommand,  SEC_ADMINISTRATOR, Console::No  },
+            { "go",      HandleHotSpotGoCommand,      SEC_ADMINISTRATOR, Console::No  },
+            { "list",    hotSpotListCommandTable                                       },
         };
         static ChatCommandTable commandTable = { { "hotspot", hotSpotCommandTable } };
         return commandTable;
@@ -475,6 +503,64 @@ public:
         const char* typeNames[] = { "", "Invasión", "Minería", "Herboristería" };
         handler->PSendSysMessage("Hot Spot de {} creado (radio {}, máx {} objetos).",
             typeNames[type], (uint32)radius, population);
+        return true;
+    }
+
+    // .hotspot enable <id>  ─ activa un spot por ID (persiste en BD)
+    static bool HandleHotSpotEnableCommand(ChatHandler* handler, uint32 id)
+    {
+        HotSpotData spot;
+        if (!HotSpotMgr::instance()->GetById(id, spot))
+        {
+            handler->PSendSysMessage(
+                "|cffff4444No existe ningún Hot Spot con ID {}.|r", id);
+            return false;
+        }
+
+        if (spot.active)
+        {
+            handler->PSendSysMessage(
+                "|cffffff00El Hot Spot [ID:{}] ya estaba activo.|r", id);
+            return true;
+        }
+
+        WorldDatabase.DirectExecute(Acore::StringFormat(
+            "UPDATE mod_hotspot SET active = 1 WHERE id = {}", id));
+        HotSpotMgr::instance()->SetActive(id, true);
+
+        handler->PSendSysMessage(
+            "|cff00ff00Hot Spot {} [ID:{}] activado.|r",
+            TypeLabel(spot.type), id);
+        return true;
+    }
+
+    // .hotspot disable <id>  ─ desactiva un spot por ID (persiste en BD)
+    // Los jugadores que estén dentro perderán el aura y los timers en el
+    // siguiente tick de OnPlayerUpdate, sin necesidad de reload.
+    static bool HandleHotSpotDisableCommand(ChatHandler* handler, uint32 id)
+    {
+        HotSpotData spot;
+        if (!HotSpotMgr::instance()->GetById(id, spot))
+        {
+            handler->PSendSysMessage(
+                "|cffff4444No existe ningún Hot Spot con ID {}.|r", id);
+            return false;
+        }
+
+        if (!spot.active)
+        {
+            handler->PSendSysMessage(
+                "|cffffff00El Hot Spot [ID:{}] ya estaba inactivo.|r", id);
+            return true;
+        }
+
+        WorldDatabase.DirectExecute(Acore::StringFormat(
+            "UPDATE mod_hotspot SET active = 0 WHERE id = {}", id));
+        HotSpotMgr::instance()->SetActive(id, false);
+
+        handler->PSendSysMessage(
+            "|cffff4444Hot Spot {} [ID:{}] desactivado.|r",
+            TypeLabel(spot.type), id);
         return true;
     }
 
