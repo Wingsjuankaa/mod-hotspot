@@ -144,16 +144,17 @@ uint32 GetMiningEntryForLevel(uint8 level)
 }
 
 // Tipo 3 – Herboristería: plantas según nivel
-// NOTA: verificar las entradas de GO contra tu base de datos world si alguna no aparece.
+// Entries verificados contra gameobject_template de AzerothCore 3.3.5a.
 uint32 GetHerbEntryForLevel(uint8 level)
 {
-    if (level <= 15) return 2044;   // Hoja de plata
-    if (level <= 25) return 2046;   // Raíz de tierra
-    if (level <= 40) return 3820;   // Garra de dragón
-    if (level <= 50) return 176583; // Flor de ensueño
-    if (level <= 60) return 180170; // Salvia de montaña argéntea
-    if (level <= 70) return 181271; // Gloria onírica (Terrallende)
-    return 190169;                  // Lirio de tigre (Rasganorte)
+    if (level <= 15) return 1617;   // Silverleaf          (skill 1)
+    if (level <= 25) return 1619;   // Earthroot           (skill 15)
+    if (level <= 35) return 1621;   // Briarthorn          (skill 70)
+    if (level <= 45) return 1622;   // Bruiseweed          (skill 100)
+    if (level <= 55) return 2046;   // Goldthorn           (skill 170)
+    if (level <= 60) return 176584; // Dreamfoil           (skill 270)
+    if (level <= 70) return 181270; // Felweed (Terrallende, skill 300)
+    return 190169;                  // Tiger Lily (Rasganorte, skill 375)
 }
 
 // -----------------------------------------------------------------------
@@ -394,6 +395,10 @@ public:
                 std::list<GameObject*> goList;
                 player->GetGameObjectListWithEntryInGrid(goList, goEntry, spotGO.radius);
 
+                LOG_DEBUG("module", "HotSpotMgr: tipo={} nivel={} goEntry={} presentes={}/{}",
+                    spotGO.type, player->GetLevel(), goEntry,
+                    (uint32)goList.size(), spotGO.max_population);
+
                 if ((uint32)goList.size() < spotGO.max_population)
                 {
                     // Spawnear en posición aleatoria dentro del hotspot (desde su centro)
@@ -405,9 +410,14 @@ public:
                         player->GetPhaseMask(), spawnX, spawnY, spotGO.z + 10.0f);
 
                     // despawnTime en segundos (300 = 5 minutos si no se recolecta antes)
-                    player->SummonGameObject(
-                        goEntry, spawnX, spawnY, spawnZ,
-                        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 300);
+                    if (!player->SummonGameObject(
+                            goEntry, spawnX, spawnY, spawnZ,
+                            0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 300))
+                    {
+                        LOG_ERROR("module",
+                            "HotSpotMgr: SummonGameObject falló para entry {}. "
+                            "Verifica que exista en gameobject_template.", goEntry);
+                    }
                 }
             }
             else

@@ -39,6 +39,18 @@ Módulo de Hot Spots para AzerothCore.
 | `xp_multiplier` | Multiplicador de XP (solo tipo 1). |
 | `radius` | Radio de la zona en unidades de juego. |
 
-> **Nota:** Los entries de GameObjects (minería/herboristería) generados automáticamente
-> son aproximados. Puedes verificarlos en tu DB con:
+> **Entries de hierbas verificados en gameobject_template (AzerothCore 3.3.5a):**
+>
+> | Nivel | Entry GO | Hierba |
+> |-------|----------|--------|
+> | 1-15  | 1617     | Silverleaf |
+> | 16-25 | 1619     | Earthroot |
+> | 26-35 | 1621     | Briarthorn |
+> | 36-45 | 1622     | Bruiseweed |
+> | 46-55 | 2046     | Goldthorn |
+> | 56-60 | 176584   | Dreamfoil |
+> | 61-70 | 181270   | Felweed (Terrallende) |
+> | 71-80 | 190169   | Tiger Lily (Rasganorte) |
+>
+> Para minería, verifica entries con:
 > `SELECT entry, name FROM gameobject_template WHERE type = 3 AND name LIKE '%veta%';`
