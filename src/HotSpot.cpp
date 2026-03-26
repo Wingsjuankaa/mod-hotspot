@@ -182,6 +182,39 @@ public:
             [id](const HotSpotData& s) { return s.id == id; }), hotspots.end());
     }
 
+    // Busca un spot por ID (para .hotspot go).
+    bool GetById(uint32 id, HotSpotData& data) const
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        for (const auto& s : hotspots)
+        {
+            if (s.id == id)
+            {
+                data = s;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Devuelve copia de todos los spots (para .hotspot list).
+    std::vector<HotSpotData> GetAll() const
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return hotspots;
+    }
+
+    // Devuelve copia de los spots de un mapa concreto (para .hotspot list zone).
+    std::vector<HotSpotData> GetByMap(uint32 mapId) const
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        std::vector<HotSpotData> result;
+        for (const auto& s : hotspots)
+            if (s.map_id == mapId)
+                result.push_back(s);
+        return result;
+    }
+
 private:
     std::vector<HotSpotData> hotspots;
     mutable std::mutex _mutex;
@@ -242,12 +275,93 @@ class HotSpot_CommandScript : public CommandScript
 public:
     HotSpot_CommandScript() : CommandScript("HotSpot_CommandScript") { }
 
+    // ── helpers ──────────────────────────────────────────────────────────
+
+    // Columnas de color por tipo
+    static const char* TypeColor(uint8 type)
+    {
+        switch (type)
+        {
+            case HOTSPOT_TYPE_INVASION: return "|cffff5555";  // rojo
+            case HOTSPOT_TYPE_MINING:   return "|cffaabbff";  // azul claro
+            case HOTSPOT_TYPE_HERB:     return "|cff55ff88";  // verde
+            default:                    return "|cffffffff";
+        }
+    }
+
+    static const char* TypeLabel(uint8 type)
+    {
+        switch (type)
+        {
+            case HOTSPOT_TYPE_INVASION: return "Invasión";
+            case HOTSPOT_TYPE_MINING:   return "Minería ";
+            case HOTSPOT_TYPE_HERB:     return "Hierba  ";
+            default:                    return "?       ";
+        }
+    }
+
+    static void PrintSpotList(ChatHandler* handler,
+                              const std::vector<HotSpotData>& spots,
+                              bool showMap)
+    {
+        for (const auto& s : spots)
+        {
+            std::string entryInfo;
+            if (s.gameobject_entry)
+                entryInfo = Acore::StringFormat(
+                    "|cffffaa00[GO:{} fijo]|r", s.gameobject_entry);
+            else if (!s.goVariants.empty())
+                entryInfo = Acore::StringFormat(
+                    "|cff44ffff[{} var(s)]|r", (uint32)s.goVariants.size());
+            else
+                entryInfo = "|cffff8800[fallback nivel]|r";
+
+            std::string line;
+            if (showMap)
+                line = Acore::StringFormat(
+                    " {}[{}]|r  {}{} |r"
+                    "  Mapa:|cff00ccff{}|r Zona:|cff00ccff{}|r"
+                    "  |cffffffff({:.0f},{:.0f},{:.0f})|r"
+                    "  R:{}{:.0f}|r  Pop:{}{} |r  {}",
+                    TypeColor(s.type), s.id,
+                    TypeColor(s.type), TypeLabel(s.type),
+                    s.map_id, s.zone_id,
+                    s.x, s.y, s.z,
+                    "|cffaaaaaa", s.radius,
+                    "|cffff8800", s.max_population,
+                    entryInfo);
+            else
+                line = Acore::StringFormat(
+                    " {}[{}]|r  {}{} |r"
+                    "  Zona:|cff00ccff{}|r"
+                    "  |cffffffff({:.0f},{:.0f},{:.0f})|r"
+                    "  R:{}{:.0f}|r  Pop:{}{} |r  {}",
+                    TypeColor(s.type), s.id,
+                    TypeColor(s.type), TypeLabel(s.type),
+                    s.zone_id,
+                    s.x, s.y, s.z,
+                    "|cffaaaaaa", s.radius,
+                    "|cffff8800", s.max_population,
+                    entryInfo);
+
+            handler->SendSysMessage(line);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+
     ChatCommandTable GetCommands() const override
     {
+        static ChatCommandTable hotSpotListCommandTable = {
+            { "zone", HandleHotSpotListZoneCommand, SEC_ADMINISTRATOR, Console::No  },
+            { "",     HandleHotSpotListAllCommand,  SEC_ADMINISTRATOR, Console::Yes },
+        };
         static ChatCommandTable hotSpotCommandTable = {
-            { "add",    HandleHotSpotAddCommand,    SEC_ADMINISTRATOR, Console::No },
-            { "delete", HandleHotSpotDeleteCommand, SEC_ADMINISTRATOR, Console::No },
-            { "reload", HandleHotSpotReloadCommand, SEC_ADMINISTRATOR, Console::No }
+            { "add",    HandleHotSpotAddCommand,    SEC_ADMINISTRATOR, Console::No  },
+            { "delete", HandleHotSpotDeleteCommand, SEC_ADMINISTRATOR, Console::No  },
+            { "reload", HandleHotSpotReloadCommand, SEC_ADMINISTRATOR, Console::No  },
+            { "go",     HandleHotSpotGoCommand,     SEC_ADMINISTRATOR, Console::No  },
+            { "list",   hotSpotListCommandTable                                      },
         };
         static ChatCommandTable commandTable = { { "hotspot", hotSpotCommandTable } };
         return commandTable;
@@ -257,6 +371,76 @@ public:
     {
         HotSpotMgr::instance()->LoadFromDB();
         handler->SendSysMessage("Hot Spots recargados.");
+        return true;
+    }
+
+    // .hotspot go <id>  ─ teleporta al centro del hotspot indicado
+    static bool HandleHotSpotGoCommand(ChatHandler* handler, uint32 id)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+
+        HotSpotData spot;
+        if (!HotSpotMgr::instance()->GetById(id, spot))
+        {
+            handler->PSendSysMessage(
+                "|cffff4444No existe ningún Hot Spot con ID {}.|r", id);
+            return false;
+        }
+
+        player->TeleportTo(spot.map_id, spot.x, spot.y, spot.z, 0.0f);
+
+        handler->PSendSysMessage(
+            "|cff00ff00Teletransportando al {} [ID:{}]"
+            " – Mapa:|cff00ccff{}|r Zona:|cff00ccff{}|r"
+            " |cffffffff({:.0f},{:.0f},{:.0f})|r",
+            TypeLabel(spot.type), spot.id,
+            spot.map_id, spot.zone_id,
+            spot.x, spot.y, spot.z);
+
+        return true;
+    }
+
+    // .hotspot list  ─ muestra todos los hotspots del mundo
+    static bool HandleHotSpotListAllCommand(ChatHandler* handler)
+    {
+        auto spots = HotSpotMgr::instance()->GetAll();
+
+        if (spots.empty())
+        {
+            handler->SendSysMessage("|cffff4444No hay Hot Spots configurados.|r");
+            return true;
+        }
+
+        handler->PSendSysMessage(
+            "|cffffff00=== Hot Spots (todos) – {} registro(s) ===|r",
+            (uint32)spots.size());
+
+        PrintSpotList(handler, spots, /*showMap=*/true);
+        return true;
+    }
+
+    // .hotspot list zone  ─ muestra sólo los hotspots del mapa actual
+    static bool HandleHotSpotListZoneCommand(ChatHandler* handler)
+    {
+        Player* player = handler->GetSession()->GetPlayer();
+        uint32 mapId  = player->GetMapId();
+        uint32 zoneId = player->GetZoneId();
+
+        auto spots = HotSpotMgr::instance()->GetByMap(mapId);
+
+        if (spots.empty())
+        {
+            handler->PSendSysMessage(
+                "|cffff4444No hay Hot Spots en el mapa {} (zona {}).|r",
+                mapId, zoneId);
+            return true;
+        }
+
+        handler->PSendSysMessage(
+            "|cffffff00=== Hot Spots – Mapa:{} Zona:{} – {} registro(s) ===|r",
+            mapId, zoneId, (uint32)spots.size());
+
+        PrintSpotList(handler, spots, /*showMap=*/false);
         return true;
     }
 

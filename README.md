@@ -22,6 +22,9 @@ Módulo de Hot Spots para AzerothCore.
   - Ej: `.hotspot add 3 6`  → zona de herboristería con hasta 6 plantas
 - `.hotspot delete` — Elimina el Hot Spot en el que estás parado.
 - `.hotspot reload` — Recarga todos los Hot Spots desde la base de datos.
+- `.hotspot go <id>` — Teleporta al centro del Hot Spot indicado por ID.
+- `.hotspot list` — Lista **todos** los Hot Spots del mundo (también funciona desde consola).
+- `.hotspot list zone` — Lista sólo los Hot Spots del **mapa actual** del jugador.
 
 ## Instalación
 1. Copia la carpeta en `modules/`.
