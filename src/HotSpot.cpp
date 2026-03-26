@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -23,7 +24,9 @@
 
 enum HotSpotSpells
 {
-    SPELL_HOTSPOT_XP = 61782
+    SPELL_HOTSPOT_XP      = 61782,  // Invasión: aura de XP bonus
+    SPELL_HOTSPOT_MINING  = 61783,  // Minería: efecto visual de zona activa
+    SPELL_HOTSPOT_HERB    = 61784   // Herboristería: efecto visual de zona activa
 };
 
 enum HotSpotType : uint8
@@ -598,6 +601,7 @@ public:
         uint32 key = player->GetGUID().GetCounter();
         _mobSpawnTimers.erase(key);
         _goSpawnTimers.erase(key);
+        _inGOSpot.erase(key);
     }
 
     void OnPlayerUpdate(Player* player, uint32 diff) override
@@ -717,8 +721,42 @@ public:
         if (!inGOSpot)
             inGOSpot = HotSpotMgr::instance()->GetHotSpotAt(mapId, px, py, pz, spotGO, HOTSPOT_TYPE_HERB);
 
+        // Detectar si el jugador estaba ya en un spot de recolección
+        bool wasInGOSpot;
+        {
+            std::lock_guard<std::mutex> lock(_timerMutex);
+            wasInGOSpot = (_inGOSpot.find(key) != _inGOSpot.end());
+        }
+
         if (inGOSpot)
         {
+            // Notificar al jugador la primera vez que entra en la zona
+            if (!wasInGOSpot)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(_timerMutex);
+                    _inGOSpot.insert(key);
+                }
+
+                uint32 spellId = (spotGO.type == HOTSPOT_TYPE_MINING)
+                    ? SPELL_HOTSPOT_MINING : SPELL_HOTSPOT_HERB;
+                player->CastSpell(player, spellId, true);
+
+                const char* zoneName   = (spotGO.type == HOTSPOT_TYPE_MINING)
+                    ? "MINERÍA" : "HERBORISTERÍA";
+                const char* zoneDetail = (spotGO.type == HOTSPOT_TYPE_MINING)
+                    ? "Filones de mineral disponibles para recolectar."
+                    : "Plantas medicinales disponibles para recolectar.";
+
+                std::string goMsg = Acore::StringFormat(
+                    "|cffffff00¡ZONA DE {}!|r\n|cff00ff00{}|r",
+                    zoneName, zoneDetail);
+                WorldPacket goData;
+                ChatHandler::BuildChatPacket(goData, CHAT_MSG_RAID_WARNING,
+                    LANG_UNIVERSAL, nullptr, nullptr, goMsg);
+                player->GetSession()->SendPacket(&goData);
+            }
+
             uint32 goTimer;
             {
                 std::lock_guard<std::mutex> lock(_timerMutex);
@@ -797,8 +835,27 @@ public:
         }
         else
         {
-            std::lock_guard<std::mutex> lock(_timerMutex);
-            _goSpawnTimers.erase(key);
+            // El jugador salió de la zona de recolección
+            if (wasInGOSpot)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(_timerMutex);
+                    _inGOSpot.erase(key);
+                }
+
+                player->RemoveAura(SPELL_HOTSPOT_MINING);
+                player->RemoveAura(SPELL_HOTSPOT_HERB);
+
+                WorldPacket goData;
+                ChatHandler::BuildChatPacket(goData, CHAT_MSG_RAID_WARNING, LANG_UNIVERSAL,
+                    nullptr, nullptr, "|cffff0000Has abandonado la zona de recolección.|r");
+                player->GetSession()->SendPacket(&goData);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(_timerMutex);
+                _goSpawnTimers.erase(key);
+            }
         }
     }
 
@@ -822,6 +879,7 @@ private:
     mutable std::mutex _timerMutex;
     std::unordered_map<uint32, uint32> _mobSpawnTimers; // tipo 1
     std::unordered_map<uint32, uint32> _goSpawnTimers;  // tipos 2 y 3
+    std::unordered_set<uint32>         _inGOSpot;       // jugadores en zona de recolección activa
 };
 
 // -----------------------------------------------------------------------
