@@ -11,6 +11,8 @@
 #include "Map.h"
 #include "LootMgr.h"
 #include "GameObject.h"
+#include "DBCStores.h"
+#include "WorldSessionMgr.h"
 #include <vector>
 #include <mutex>
 #include <algorithm>
@@ -509,6 +511,42 @@ public:
         return true;
     }
 
+    // ── helpers de anuncios mundiales ────────────────────────────────────
+
+    // Devuelve el nombre de zona del DBC priorizando español.
+    // Orden: esES (6) → esMX (7) → locale del servidor → enUS (0).
+    // Así funciona correctamente aunque DBC.Locale esté en enUS.
+    static std::string GetZoneName(uint32 zoneId)
+    {
+        if (zoneId == 0)
+            return "tierras desconocidas";
+
+        AreaTableEntry const* area = sAreaTableStore.LookupEntry(zoneId);
+        if (!area)
+            return Acore::StringFormat("zona {}", zoneId);
+
+        uint32 serverLocale = sWorld->GetDefaultDbcLocale();
+        uint32 checkOrder[] = { LOCALE_esES, LOCALE_esMX, serverLocale, LOCALE_enUS };
+
+        for (uint32 locale : checkOrder)
+        {
+            if (locale < MAX_LOCALES &&
+                area->area_name[locale] && *area->area_name[locale])
+                return area->area_name[locale];
+        }
+
+        return Acore::StringFormat("zona {}", zoneId);
+    }
+
+    // Envía un mensaje de chat de sistema a TODOS los jugadores conectados.
+    static void BroadcastWorldAnnouncement(const std::string& msg)
+    {
+        WorldPacket data;
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_UNIVERSAL,
+            nullptr, nullptr, msg);
+        sWorldSessionMgr->SendGlobalMessage(&data);
+    }
+
     // .hotspot enable <id>  ─ activa un spot por ID (persiste en BD)
     static bool HandleHotSpotEnableCommand(ChatHandler* handler, uint32 id)
     {
@@ -530,6 +568,23 @@ public:
         WorldDatabase.DirectExecute(Acore::StringFormat(
             "UPDATE mod_hotspot SET active = 1 WHERE id = {}", id));
         HotSpotMgr::instance()->SetActive(id, true);
+
+        // Anuncio mundial según tipo de spot
+        std::string zoneName = GetZoneName(spot.zone_id);
+        std::string announcement;
+        if (spot.type == HOTSPOT_TYPE_INVASION)
+            announcement = Acore::StringFormat(
+                "|cffff4444[ALERTA]|r |cffff8800¡Se ha avistado una invasión"
+                " atacando las tierras de {}!|r", zoneName);
+        else if (spot.type == HOTSPOT_TYPE_MINING)
+            announcement = Acore::StringFormat(
+                "|cffffff00[AVISO]|r |cff00ccff¡Exploradores han encontrado"
+                " una zona rica en Minerales en {}!|r", zoneName);
+        else
+            announcement = Acore::StringFormat(
+                "|cffffff00[AVISO]|r |cff55ff88¡Exploradores han encontrado"
+                " una zona rica en Hierbas en {}!|r", zoneName);
+        BroadcastWorldAnnouncement(announcement);
 
         handler->PSendSysMessage(
             "|cff00ff00Hot Spot {} [ID:{}] activado.|r",
@@ -560,6 +615,23 @@ public:
         WorldDatabase.DirectExecute(Acore::StringFormat(
             "UPDATE mod_hotspot SET active = 0 WHERE id = {}", id));
         HotSpotMgr::instance()->SetActive(id, false);
+
+        // Anuncio mundial según tipo de spot
+        std::string zoneName = GetZoneName(spot.zone_id);
+        std::string announcement;
+        if (spot.type == HOTSPOT_TYPE_INVASION)
+            announcement = Acore::StringFormat(
+                "|cff00ff00[NOTICIA]|r |cffaaffaa¡La invasión en {} ha sido repelida!|r",
+                zoneName);
+        else if (spot.type == HOTSPOT_TYPE_MINING)
+            announcement = Acore::StringFormat(
+                "|cffaaaaaa[AVISO]|r Los recursos minerales de {} se han agotado.|r",
+                zoneName);
+        else
+            announcement = Acore::StringFormat(
+                "|cffaaaaaa[AVISO]|r Las hierbas de {} han sido recolectadas.|r",
+                zoneName);
+        BroadcastWorldAnnouncement(announcement);
 
         handler->PSendSysMessage(
             "|cffff4444Hot Spot {} [ID:{}] desactivado.|r",
