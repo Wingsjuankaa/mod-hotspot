@@ -37,13 +37,15 @@ struct HotSpotData
 {
     uint32 id;
     uint32 map_id;
+    uint32 zone_id; // ZoneId de la zona donde se creó el spot (0 = no definido)
     float x, y, z, radius;
     float xp_mult;
     float respawn_mult;
     uint8 type;
     uint32 creature_entry;
     uint32 max_population;
-    uint32 gameobject_entry; // Usado en tipos 2 (minería) y 3 (herboristería). 0 = auto según nivel.
+    uint32 gameobject_entry; // Tipos 2/3: 0 = auto (scan de zona o nivel de jugador).
+    std::vector<uint32> goVariants; // Entries reales de la zona (scan al cargar).
 };
 
 class HotSpotMgr
@@ -57,27 +59,99 @@ public:
         hotspots.clear();
 
         QueryResult result = WorldDatabase.Query(
-            "SELECT id, map_id, x, y, z, radius, xp_multiplier, respawn_multiplier, type, "
-            "creature_entry, max_population, gameobject_entry "
+            "SELECT id, map_id, zone_id, x, y, z, radius, xp_multiplier, "
+            "respawn_multiplier, type, creature_entry, max_population, gameobject_entry "
             "FROM mod_hotspot WHERE active = 1");
         if (!result) return;
 
+        // Listas de entries de GOs conocidos para scan de mapa.
+        // Verificados contra gameobject_template de AzerothCore 3.3.5a.
+        static const char* HERB_SCAN_LIST =
+            "1617,1618,1619,1620,1621,1622,1623,1624,1628,"
+            "2041,2042,2044,2045,2046,2866,"
+            "3724,3725,3726,3727,3729,3730,"
+            "142140,142142,142144,142145,"
+            "176583,176584,176586,176588,"
+            "176636,176637,176638,176639,176640,"
+            "180164,180165,180166,180167,180168,"
+            "181270,181271,181280,183044,183045,"
+            "189973,190169,190170,190171,190176,191019";
+
+        static const char* MINING_SCAN_LIST =
+            "324,1731,1732,1733,1734,1735,"
+            "2040,2047,2054,2055,3763,3764,"
+            "103711,103713,105569,"
+            "150079,150080,150081,150082,"
+            "165658,175404,176643,176645,"
+            "181108,181109,181248,181249,"
+            "181555,181556,181557,"
+            "189978,189979,189980,189981,191133";
+
         do {
             Field* fields = result->Fetch();
-            hotspots.push_back({
-                fields[0].Get<uint32>(),  // id
-                fields[1].Get<uint32>(),  // map_id
-                fields[2].Get<float>(),   // x
-                fields[3].Get<float>(),   // y
-                fields[4].Get<float>(),   // z
-                fields[5].Get<float>(),   // radius
-                fields[6].Get<float>(),   // xp_mult
-                fields[7].Get<float>(),   // respawn_mult
-                fields[8].Get<uint8>(),   // type
-                fields[9].Get<uint32>(),  // creature_entry
-                fields[10].Get<uint32>(), // max_population
-                fields[11].Get<uint32>()  // gameobject_entry
-            });
+
+            HotSpotData data;
+            data.id              = fields[0].Get<uint32>();
+            data.map_id          = fields[1].Get<uint32>();
+            data.zone_id         = fields[2].Get<uint32>();
+            data.x               = fields[3].Get<float>();
+            data.y               = fields[4].Get<float>();
+            data.z               = fields[5].Get<float>();
+            data.radius          = fields[6].Get<float>();
+            data.xp_mult         = fields[7].Get<float>();
+            data.respawn_mult    = fields[8].Get<float>();
+            data.type            = fields[9].Get<uint8>();
+            data.creature_entry  = fields[10].Get<uint32>();
+            data.max_population  = fields[11].Get<uint32>();
+            data.gameobject_entry = fields[12].Get<uint32>();
+
+            // Scan de zona: si no hay entry fijo, detectar variedad real de recursos.
+            // Usa ZoneId exacto si está disponible; bounding-box 1500u como fallback.
+            if (data.gameobject_entry == 0 &&
+                (data.type == HOTSPOT_TYPE_MINING || data.type == HOTSPOT_TYPE_HERB))
+            {
+                const char* scanList = (data.type == HOTSPOT_TYPE_HERB)
+                    ? HERB_SCAN_LIST : MINING_SCAN_LIST;
+
+                QueryResult scan;
+                if (data.zone_id > 0)
+                {
+                    // Scan exacto por zona (columna ZoneId de la tabla gameobject)
+                    scan = WorldDatabase.Query(
+                        Acore::StringFormat(
+                            "SELECT DISTINCT id FROM gameobject "
+                            "WHERE map = {} AND ZoneId = {} AND id IN ({})",
+                            data.map_id, data.zone_id, scanList));
+                }
+                else
+                {
+                    // Fallback: bounding box de ±1500 unidades alrededor del spot
+                    scan = WorldDatabase.Query(
+                        Acore::StringFormat(
+                            "SELECT DISTINCT id FROM gameobject "
+                            "WHERE map = {} AND id IN ({}) "
+                            "AND position_x BETWEEN {} AND {} "
+                            "AND position_y BETWEEN {} AND {}",
+                            data.map_id, scanList,
+                            data.x - 1500.0f, data.x + 1500.0f,
+                            data.y - 1500.0f, data.y + 1500.0f));
+                }
+
+                if (scan)
+                {
+                    do {
+                        data.goVariants.push_back(
+                            scan->Fetch()[0].Get<uint32>());
+                    } while (scan->NextRow());
+                }
+
+                LOG_DEBUG("module",
+                    "HotSpotMgr: spot {} (mapa {}, zona {}, tipo {}) – {} variante(s).",
+                    data.id, data.map_id, data.zone_id, data.type,
+                    (uint32)data.goVariants.size());
+            }
+
+            hotspots.push_back(std::move(data));
         } while (result->NextRow());
 
         LOG_INFO("module", "HotSpotMgr: {} spots cargados.", (uint32)hotspots.size());
@@ -131,16 +205,17 @@ uint32 GetUndeadEntryForLevel(uint8 level)
 }
 
 // Tipo 2 – Minería: nodos de mineral según nivel
-// NOTA: verificar las entradas de GO contra tu base de datos world si alguna no aparece.
+// Entries verificados contra gameobject_template de AzerothCore 3.3.5a.
+// Solo se usa como fallback cuando el scan de mapa no da resultados.
 uint32 GetMiningEntryForLevel(uint8 level)
 {
-    if (level <= 20) return 1731;   // Veta de cobre
-    if (level <= 30) return 2055;   // Veta de estaño
-    if (level <= 40) return 1735;   // Yacimiento de hierro
-    if (level <= 50) return 2040;   // Yacimiento de mitril
-    if (level <= 60) return 324;    // Veta de torio
-    if (level <= 70) return 181248; // Yacimiento de hierro vil (Terrallende)
-    return 189979;                  // Yacimiento de saronita (Rasganorte)
+    if (level <= 20) return 1731;   // Copper Vein         (skill 1)
+    if (level <= 30) return 1732;   // Tin Vein            (skill 65)
+    if (level <= 40) return 1735;   // Iron Deposit        (skill 125)
+    if (level <= 50) return 2040;   // Mithril Deposit     (skill 175)
+    if (level <= 60) return 324;    // Small Thorium Vein  (skill 230)
+    if (level <= 70) return 181555; // Fel Iron Deposit    (skill 300, Terrallende)
+    return 189980;                  // Saronite Deposit    (skill 400, Rasganorte)
 }
 
 // Tipo 3 – Herboristería: plantas según nivel
@@ -203,9 +278,11 @@ public:
         float radius = 50.0f;
         WorldDatabase.DirectExecute(Acore::StringFormat(
             "INSERT INTO mod_hotspot "
-            "(map_id, x, y, z, radius, xp_multiplier, respawn_multiplier, type, active, creature_entry, max_population, gameobject_entry) "
-            "VALUES ({}, {}, {}, {}, {}, 3.0, 0.05, {}, 1, 0, {}, 0)",
+            "(map_id, zone_id, x, y, z, radius, xp_multiplier, respawn_multiplier, "
+            "type, active, creature_entry, max_population, gameobject_entry) "
+            "VALUES ({}, {}, {}, {}, {}, {}, 3.0, 0.05, {}, 1, 0, {}, 0)",
             player->GetMapId(),
+            player->GetZoneId(),
             player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
             radius, type, population));
 
@@ -387,19 +464,41 @@ public:
 
                 uint32 goEntry = spotGO.gameobject_entry
                     ? spotGO.gameobject_entry
-                    : (spotGO.type == HOTSPOT_TYPE_MINING
-                        ? GetMiningEntryForLevel(player->GetLevel())
-                        : GetHerbEntryForLevel(player->GetLevel()));
+                    : (!spotGO.goVariants.empty()
+                        // Variedad real del mapa → elegir al azar
+                        ? spotGO.goVariants[urand(0, (uint32)spotGO.goVariants.size() - 1)]
+                        // Fallback: selección por nivel de jugador
+                        : (spotGO.type == HOTSPOT_TYPE_MINING
+                            ? GetMiningEntryForLevel(player->GetLevel())
+                            : GetHerbEntryForLevel(player->GetLevel())));
 
-                // Contar nodos ya presentes en el área
-                std::list<GameObject*> goList;
-                player->GetGameObjectListWithEntryInGrid(goList, goEntry, spotGO.radius);
+                // Contar nodos presentes de TODAS las variantes conocidas
+                // para respetar max_population global del hotspot.
+                uint32 totalPresent = 0;
+                if (!spotGO.goVariants.empty())
+                {
+                    for (uint32 e : spotGO.goVariants)
+                    {
+                        std::list<GameObject*> tmp;
+                        player->GetGameObjectListWithEntryInGrid(
+                            tmp, e, spotGO.radius);
+                        totalPresent += (uint32)tmp.size();
+                    }
+                }
+                else
+                {
+                    std::list<GameObject*> tmp;
+                    player->GetGameObjectListWithEntryInGrid(
+                        tmp, goEntry, spotGO.radius);
+                    totalPresent = (uint32)tmp.size();
+                }
 
-                LOG_DEBUG("module", "HotSpotMgr: tipo={} nivel={} goEntry={} presentes={}/{}",
-                    spotGO.type, player->GetLevel(), goEntry,
-                    (uint32)goList.size(), spotGO.max_population);
+                LOG_DEBUG("module",
+                    "HotSpotMgr: tipo={} goEntry={} presentes={}/{} variantes={}",
+                    spotGO.type, goEntry, totalPresent, spotGO.max_population,
+                    (uint32)spotGO.goVariants.size());
 
-                if ((uint32)goList.size() < spotGO.max_population)
+                if (totalPresent < spotGO.max_population)
                 {
                     // Spawnear en posición aleatoria dentro del hotspot (desde su centro)
                     float angle  = rand_norm() * 2.0f * (float)M_PI;
