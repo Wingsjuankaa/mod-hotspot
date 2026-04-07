@@ -13,6 +13,7 @@
 #include "GameObject.h"
 #include "DBCStores.h"
 #include "WorldSessionMgr.h"
+#include "Formulas.h"
 #include <vector>
 #include <mutex>
 #include <algorithm>
@@ -248,17 +249,30 @@ private:
 // Helpers de entradas de criaturas / objetos según nivel del jugador
 // -----------------------------------------------------------------------
 
-// Tipo 1 – Invasión: No-muertos escalados al nivel
+// Tipo 1 – Invasión: No-muertos escalados al nivel del jugador.
+// Todos los entries verificados en creature_template: type=6 (undead), rank=0 (normal),
+// faction=21 (hostil a todos, Alliance y Horde). El nivel del template no importa
+// porque se sobreescribe con SetLevel() en el momento del spawn.
 uint32 GetUndeadEntryForLevel(uint8 level)
 {
-    if (level <= 10) return 1530;   // Esqueleto
-    if (level <= 20) return 1563;   // Necrófago débil
-    if (level <= 30) return 1783;   // Guerrero esquelético
-    if (level <= 40) return 1912;   // Necrófago de plaga
-    if (level <= 50) return 2420;   // Cadáver putrefacto
-    if (level <= 60) return 4416;   // Esqueleto Forjatiniebla
-    if (level <= 70) return 16244;  // Ansia resucitada
-    return 25697;                   // Bestia de la Plaga (80)
+    if (level <= 10) return 1530;   // Rotting Ancestor          (zombie básico, Tirisfal)
+    if (level <= 20) return 570;    // Brain Eater               (ghoul, Duskwood)
+    if (level <= 30) return 1270;   // Fetid Corpse              (zombie putrefacto)
+    if (level <= 40) return 8537;   // Interloper                (no-muerto de Plaguelands)
+    if (level <= 50) return 4474;   // Rotting Cadaver           (cadáver, Plaguelands)
+    if (level <= 60) return 8523;   // Scourge Soldier           (soldado de la Plaga)
+    if (level <= 70) return 25463;  // Soldier of the Frozen Wastes (Scourge, Rasganorte)
+    return 26515;                   // Carrion Ghoul             (ghoul, Rasganorte)
+}
+
+// Tipo 1 – Invasión: salud escalada por fórmula cuadrática propia.
+// Desacopla la salud del ModHealth de cada creature_template para evitar
+// saltos bruscos al cambiar de entry entre rangos de nivel.
+// Valores de referencia: nivel 10 ~ 250 HP | nivel 60 ~ 6000 HP | nivel 80 ~ 10400 HP
+uint32 GetInvasionHealthForLevel(uint8 level)
+{
+    uint32 lvl = static_cast<uint32>(level);
+    return 10 * lvl + (3 * lvl * lvl) / 2;
 }
 
 // Tipo 2 – Minería: nodos de mineral según nivel
@@ -785,19 +799,24 @@ public:
                         uint8 level = player->GetLevel();
                         undead->SetLevel(level);
 
+                        // Mana: se saca del template (no afecta la dificultad percibida)
                         CreatureTemplate const* cInfo = undead->GetCreatureTemplate();
                         if (CreatureBaseStats const* stats =
                                 sObjectMgr->GetCreatureBaseStats(level, cInfo->unit_class))
                         {
-                            uint32 health = stats->GenerateHealth(cInfo);
-                            undead->SetStatFlatModifier(UNIT_MOD_HEALTH, TOTAL_VALUE, (float)health);
-
                             if (uint32 mana = stats->GenerateMana(cInfo))
                                 undead->SetStatFlatModifier(UNIT_MOD_MANA, TOTAL_VALUE, (float)mana);
                         }
 
                         undead->UpdateAllStats();
-                        undead->SetFullHealth();
+
+                        // Salud fija por fórmula cuadrática: desacopla la HP del
+                        // ModHealth del creature_template para evitar saltos bruscos
+                        // al cambiar de entry entre rangos de nivel.
+                        // Nivel 10 ~ 250 HP | nivel 60 ~ 6000 HP | nivel 80 ~ 10400 HP
+                        uint32 health = GetInvasionHealthForLevel(level);
+                        undead->SetMaxHealth(health);
+                        undead->SetHealth(health);
                         undead->SetInCombatWith(player);
                         if (undead->AI()) undead->AI()->AttackStart(player);
                     }
@@ -1053,6 +1072,31 @@ public:
         // Paños (40 % de probabilidad, 1-3 unidades)
         if (urand(1, 100) <= 40)
             creature->loot.AddItem(LootStoreItem(GetClothEntryForLevel(level), 0, 100.0f, false, 0, 0, 1, 3));
+
+        // XP: player->SummonCreature pone al jugador como owner de la mob,
+        // por lo que KillRewarder la clasifica como unidad PvP (_isPvP = true)
+        // y no calcula ninguna XP. La damos aquí directamente con nullptr como
+        // víctima para saltarnos esa comprobación.
+        // El multiplicador xp_mult del spot se aplica directamente porque ya
+        // tenemos el spot cargado, evitando depender del aura SPELL_HOTSPOT_XP.
+        if (!player->HasPlayerFlag(PLAYER_FLAGS_NO_XP_GAIN) &&
+            player->GetLevel() < sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL))
+        {
+            // Acore::XP::Gain aplica creature_template->ModExperience, que en
+            // muchos entries vanilla es < 1.0 y reduce la XP drásticamente.
+            // Usamos BaseGain directamente (mob al mismo nivel que el jugador)
+            // para obtener la XP "limpia" de un combate normal y luego aplicamos
+            // el multiplicador del spot encima.
+            ContentLevels contentLvl = GetContentLevelsForMapAndZone(
+                player->GetMapId(), player->GetZoneId());
+            uint32 baseXp = Acore::XP::BaseGain(level, level, contentLvl);
+            baseXp = uint32(baseXp * sWorld->getRate(RATE_XP_KILL));
+            uint32 xp = uint32(baseXp * spot.xp_mult);
+
+
+            if (xp > 0)
+                player->GiveXP(xp, nullptr);
+        }
     }
 };
 
