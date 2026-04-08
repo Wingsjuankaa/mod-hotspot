@@ -724,6 +724,7 @@ public:
         _mobSpawnTimers.erase(key);
         _goSpawnTimers.erase(key);
         _inGOSpot.erase(key);
+        _inInvasionSpot.erase(key);
     }
 
     void OnPlayerUpdate(Player* player, uint32 diff) override
@@ -742,11 +743,21 @@ public:
         // TIPO 1 – INVASIÓN: spawnea mobs no-muertos y multiplica XP
         // ===================================================================
         HotSpotData spot;
+        bool wasInInvasionSpot;
+        {
+            std::lock_guard<std::mutex> lock(_timerMutex);
+            wasInInvasionSpot = (_inInvasionSpot.find(key) != _inInvasionSpot.end());
+        }
+
         if (HotSpotMgr::instance()->GetHotSpotAt(mapId, px, py, pz, spot, HOTSPOT_TYPE_INVASION))
         {
             // Notificar al jugador la primera vez que entra
-            if (!player->HasAura(SPELL_HOTSPOT_XP))
+            if (!wasInInvasionSpot)
             {
+                {
+                    std::lock_guard<std::mutex> lock(_timerMutex);
+                    _inInvasionSpot.insert(key);
+                }
                 player->CastSpell(player, SPELL_HOTSPOT_XP, true);
                 SendHotSpotMapMarker(player, spot);
                 std::string msg = Acore::StringFormat(
@@ -756,6 +767,11 @@ public:
                 ChatHandler::BuildChatPacket(data, CHAT_MSG_RAID_WARNING,
                     LANG_UNIVERSAL, nullptr, nullptr, msg);
                 player->GetSession()->SendPacket(&data);
+            }
+            else if (!player->HasAura(SPELL_HOTSPOT_XP))
+            {
+                // El aura expiró mientras el jugador sigue dentro: re-aplicarla sin mostrar el mensaje
+                player->CastSpell(player, SPELL_HOTSPOT_XP, true);
             }
 
             // Timer de spawn por jugador (no compartido)
@@ -833,12 +849,20 @@ public:
             {
                 std::lock_guard<std::mutex> lock(_timerMutex);
                 _mobSpawnTimers.erase(key);
+                _inInvasionSpot.erase(key);
             }
             player->RemoveAura(SPELL_HOTSPOT_XP);
             WorldPacket data;
             ChatHandler::BuildChatPacket(data, CHAT_MSG_RAID_WARNING, LANG_UNIVERSAL,
                 nullptr, nullptr, "|cffff0000La invasión ha cesado.|r");
             player->GetSession()->SendPacket(&data);
+        }
+        else if (wasInInvasionSpot)
+        {
+            // El jugador salió del spot pero el aura ya no existía
+            std::lock_guard<std::mutex> lock(_timerMutex);
+            _mobSpawnTimers.erase(key);
+            _inInvasionSpot.erase(key);
         }
 
         // ===================================================================
@@ -1009,6 +1033,7 @@ private:
     std::unordered_map<uint32, uint32> _mobSpawnTimers; // tipo 1
     std::unordered_map<uint32, uint32> _goSpawnTimers;  // tipos 2 y 3
     std::unordered_set<uint32>         _inGOSpot;       // jugadores en zona de recolección activa
+    std::unordered_set<uint32>         _inInvasionSpot; // jugadores en zona de invasión activa
 };
 
 // -----------------------------------------------------------------------
@@ -1067,11 +1092,18 @@ public:
 
         // Pociones (30 % de probabilidad)
         if (urand(1, 100) <= 30)
-            creature->loot.AddItem(LootStoreItem(GetPotionEntryForLevel(level), 0, 100.0f, false, 0, 0, 1, 1));
+            creature->loot.AddItem(LootStoreItem(GetPotionEntryForLevel(level), 0, 100.0f, false, LOOT_MODE_DEFAULT, 0, 1, 1));
 
         // Paños (40 % de probabilidad, 1-3 unidades)
         if (urand(1, 100) <= 40)
-            creature->loot.AddItem(LootStoreItem(GetClothEntryForLevel(level), 0, 100.0f, false, 0, 0, 1, 3));
+            creature->loot.AddItem(LootStoreItem(GetClothEntryForLevel(level), 0, 100.0f, false, LOOT_MODE_DEFAULT, 0, 1, 3));
+
+        // El engine comprueba UNIT_DYNFLAG_LOOTABLE ANTES de llamar a OnUnitDeath.
+        // Como estas criaturas son TempSummons sin tabla de loot, en ese momento
+        // loot.isLooted()==true y la flag nunca se pone. La establecemos aquí
+        // explícitamente para que el jugador pueda abrir el cuerpo.
+        creature->loot.loot_type = LOOT_CORPSE;
+        creature->SetDynamicFlag(UNIT_DYNFLAG_LOOTABLE);
 
         // XP: player->SummonCreature pone al jugador como owner de la mob,
         // por lo que KillRewarder la clasifica como unidad PvP (_isPvP = true)
