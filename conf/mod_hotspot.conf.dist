@@ -1,5 +1,5 @@
 [conf]
-conf_version=2024032301
+conf_version=2026040801
 
 #
 # HotSpot.Enable
@@ -14,3 +14,49 @@ HotSpot.Enable = 1
 # Default: 1
 #
 HotSpot.AnnounceOnLogin = 1
+
+#
+# HotSpot.AutoRotate.Enable
+# Activa los timers independientes de rotacion por spot.
+# Los spots con rotate=1 siguen el ciclo: activo X seg → cooldown Y seg → activo...
+# Varios spots pueden estar activos al mismo tiempo (cada uno tiene su propio timer).
+# Los spots con rotate=0 mantienen su estado active de la BD permanentemente.
+# Default: 1
+#
+HotSpot.AutoRotate.Enable = 1
+
+# =============================================================================
+# Duracion ACTIVA de cada tipo de spot (en segundos).
+# Tiempo que el spot permanece activo antes de entrar en cooldown.
+# Minimo efectivo: 60 segundos.
+# =============================================================================
+
+# HotSpot.ActiveDuration.Invasion
+# Default: 1800 (30 minutos activo)
+HotSpot.ActiveDuration.Invasion = 1800
+
+# HotSpot.ActiveDuration.Mining
+# Default: 900 (15 minutos activo)
+HotSpot.ActiveDuration.Mining = 900
+
+# HotSpot.ActiveDuration.Herb
+# Default: 900 (15 minutos activo)
+HotSpot.ActiveDuration.Herb = 900
+
+# =============================================================================
+# Duracion de COOLDOWN de cada tipo de spot (en segundos).
+# Tiempo que el spot permanece INACTIVO antes de volver a activarse.
+# Minimo efectivo: 60 segundos.
+# =============================================================================
+
+# HotSpot.CooldownDuration.Invasion
+# Default: 3600 (60 minutos inactivo)
+HotSpot.CooldownDuration.Invasion = 3600
+
+# HotSpot.CooldownDuration.Mining
+# Default: 1800 (30 minutos inactivo)
+HotSpot.CooldownDuration.Mining = 1800
+
+# HotSpot.CooldownDuration.Herb
+# Default: 1800 (30 minutos inactivo)
+HotSpot.CooldownDuration.Herb = 1800

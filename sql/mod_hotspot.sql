@@ -18,6 +18,7 @@ CREATE TABLE `mod_hotspot` (
   `creature_entry` INT NOT NULL DEFAULT 0 COMMENT 'Entry de criatura para tipo 1. 0 = auto según nivel.',
   `max_population` INT NOT NULL DEFAULT 10,
   `gameobject_entry` INT NOT NULL DEFAULT 0 COMMENT 'Entry de GO para tipos 2 y 3. 0 = auto (scan de zona).',
+  `rotate` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1 = participa en la rotación automática. 0 = estado permanente (controlled manually).',
   `comment` VARCHAR(255) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -31,4 +32,7 @@ CREATE TABLE `mod_hotspot` (
 --     AFTER `map_id`,
 --   ADD COLUMN IF NOT EXISTS `gameobject_entry` INT NOT NULL DEFAULT 0
 --     COMMENT 'Entry de GO para tipos 2 y 3. 0 = auto (scan de zona).'
---     AFTER `max_population`;
+--     AFTER `max_population`,
+--   ADD COLUMN IF NOT EXISTS `rotate` TINYINT(1) NOT NULL DEFAULT 1
+--     COMMENT '1 = participa en la rotación automática. 0 = estado permanente.'
+--     AFTER `gameobject_entry`;

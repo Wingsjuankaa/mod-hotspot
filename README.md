@@ -15,6 +15,92 @@ Módulo de Hot Spots para AzerothCore.
 - **Herboristería (tipo 3):** Plantas temporales (5 min) que aparecen mientras el jugador está en la zona.
 - Los tipos 2 y 3 usan la entrada `gameobject_entry` de la tabla. Con `0` se elige automáticamente por nivel del jugador.
 
+## Sistema de Rotación
+
+Cada spot con `rotate=1` tiene un **timer completamente independiente**:
+
+```
+[COOLDOWN Y segundos] → [ACTIVO X segundos] → [COOLDOWN Y segundos] → ...
+```
+
+- Varios spots pueden estar activos **al mismo tiempo**.
+- Al arrancar el servidor, cada spot recibe un cooldown inicial aleatorio entre 0 y Y para que no se activen todos a la vez.
+- Los tiempos X e Y se configuran por tipo en `mod_hotspot.conf`.
+- Los spots con `rotate=0` ignoran el sistema de timers: su estado `active` de la BD es permanente (control manual con `.hotspot enable/disable`).
+
+## Comandos In-game
+- `.hotspot add <tipo> <población_máxima>` — Crea un Hot Spot en tu posición actual.
+  - Ej: `.hotspot add 1 15` → zona de invasión con hasta 15 mobs
+  - Ej: `.hotspot add 2 8`  → zona de minería con hasta 8 nodos
+  - Ej: `.hotspot add 3 6`  → zona de herboristería con hasta 6 plantas
+- `.hotspot delete` — Elimina el Hot Spot en el que estás parado.
+- `.hotspot reload` — Recarga todos los Hot Spots desde la base de datos (reinicia timers).
+- `.hotspot go <id>` — Teleporta al centro del Hot Spot indicado por ID.
+- `.hotspot list` — Lista **todos** los Hot Spots del mundo (también funciona desde consola).
+- `.hotspot list zone` — Lista sólo los Hot Spots del **mapa actual** del jugador.
+- `.hotspot enable <id>` — Activa manualmente un spot (persiste en BD).
+- `.hotspot disable <id>` — Desactiva manualmente un spot (persiste en BD).
+
+## Instalación
+1. Copia la carpeta en `modules/`.
+2. Ejecuta `sql/mod_hotspot.sql` en tu base de datos `world`.
+3. Copia `conf/mod_hotspot.conf.dist` como `mod_hotspot.conf` y ajusta los tiempos.
+4. Compila el core.
+
+## Tabla `mod_hotspot`
+
+| Columna | Descripción |
+|---------|-------------|
+| `type` | 1=Invasión, 2=Minería, 3=Herboristería |
+| `rotate` | 1 = ciclo automático (activo/cooldown). 0 = estado manual permanente. |
+| `creature_entry` | Entry de criatura para tipo 1. `0` = auto por nivel. |
+| `gameobject_entry` | Entry de GO para tipos 2 y 3. `0` = auto por nivel. |
+| `max_population` | Máximo de mobs/nodos simultáneos en la zona. |
+| `xp_multiplier` | Multiplicador de XP (solo tipo 1). |
+| `radius` | Radio de la zona en unidades de juego. |
+
+## Configuración de tiempos
+
+| Clave | Descripción | Por defecto |
+|-------|-------------|-------------|
+| `HotSpot.ActiveDuration.Invasion` | Segundos activo (tipo 1) | 1800 (30 min) |
+| `HotSpot.CooldownDuration.Invasion` | Segundos en cooldown (tipo 1) | 3600 (60 min) |
+| `HotSpot.ActiveDuration.Mining` | Segundos activo (tipo 2) | 900 (15 min) |
+| `HotSpot.CooldownDuration.Mining` | Segundos en cooldown (tipo 2) | 1800 (30 min) |
+| `HotSpot.ActiveDuration.Herb` | Segundos activo (tipo 3) | 900 (15 min) |
+| `HotSpot.CooldownDuration.Herb` | Segundos en cooldown (tipo 3) | 1800 (30 min) |
+
+> **Entries de hierbas verificados en gameobject_template (AzerothCore 3.3.5a):**
+>
+> | Nivel | Entry GO | Hierba |
+> |-------|----------|--------|
+> | 1-15  | 1617     | Silverleaf |
+> | 16-25 | 1619     | Earthroot |
+> | 26-35 | 1621     | Briarthorn |
+> | 36-45 | 1622     | Bruiseweed |
+> | 46-55 | 2046     | Goldthorn |
+> | 56-60 | 176584   | Dreamfoil |
+> | 61-70 | 181270   | Felweed (Terrallende) |
+> | 71-80 | 190169   | Tiger Lily (Rasganorte) |
+>
+> Para minería, verifica entries con:
+> `SELECT entry, name FROM gameobject_template WHERE type = 3 AND name LIKE '%veta%';`
+
+
+## Tipos de Hot Spot
+
+| Tipo | Nombre | Descripción |
+|------|--------|-------------|
+| 1 | **Invasión** | Spawnea mobs No-muertos escalados al nivel del jugador. Multiplica XP. |
+| 2 | **Minería** | Spawnea nodos de mineral escalados al nivel del jugador. |
+| 3 | **Herboristería** | Spawnea plantas escaladas al nivel del jugador. |
+
+## Características
+- **Invasión (tipo 1):** Mobs No-muertos con estadísticas escaladas, loot dinámico (pociones, paños, dinero) y multiplicador de XP configurable.
+- **Minería (tipo 2):** Nodos de mineral temporales (5 min) que aparecen mientras el jugador está en la zona.
+- **Herboristería (tipo 3):** Plantas temporales (5 min) que aparecen mientras el jugador está en la zona.
+- Los tipos 2 y 3 usan la entrada `gameobject_entry` de la tabla. Con `0` se elige automáticamente por nivel del jugador.
+
 ## Comandos In-game
 - `.hotspot add <tipo> <población_máxima>` — Crea un Hot Spot en tu posición actual.
   - Ej: `.hotspot add 1 15` → zona de invasión con hasta 15 mobs

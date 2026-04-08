@@ -52,7 +52,8 @@ struct HotSpotData
     uint32 max_population;
     uint32 gameobject_entry;
     std::vector<uint32> goVariants;
-    bool active; // true = el spot está activo y spawnea contenido
+    bool active;  // true = el spot está activo y spawnea contenido
+    bool rotate;  // true = participa en la rotación automática
 };
 
 class HotSpotMgr
@@ -68,7 +69,7 @@ public:
         QueryResult result = WorldDatabase.Query(
             "SELECT id, map_id, zone_id, x, y, z, radius, xp_multiplier, "
             "respawn_multiplier, type, creature_entry, max_population, "
-            "gameobject_entry, active "
+            "gameobject_entry, active, rotate "
             "FROM mod_hotspot");
         if (!result) return;
 
@@ -113,6 +114,7 @@ public:
             data.max_population  = fields[11].Get<uint32>();
             data.gameobject_entry = fields[12].Get<uint32>();
             data.active           = fields[13].Get<bool>();
+            data.rotate           = fields[14].Get<bool>();
 
             // Scan de zona: para todos los spots con entry automático (activos o no),
             // así un spot inactivo que se active en caliente ya tiene sus variantes listas.
@@ -165,7 +167,6 @@ public:
 
         LOG_INFO("module", "HotSpotMgr: {} spots cargados.", (uint32)hotspots.size());
     }
-
     bool GetHotSpotAt(uint32 mapId, float x, float y, float z, HotSpotData& data, uint8 type = 0) const
     {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -240,10 +241,213 @@ public:
         return false;
     }
 
+    // -----------------------------------------------------------------------
+    // Rotación automática – timer independiente por spot
+    // Cada spot con rotate=1 tiene su propio ciclo: activo X seg → cooldown Y seg → activo...
+    // Varios spots pueden estar activos al mismo tiempo.
+    // -----------------------------------------------------------------------
+    void InitRotation()
+    {
+        if (!sConfigMgr->GetOption<bool>("HotSpot.AutoRotate.Enable", true))
+            return;
+
+        auto readMs = [](const char* key, uint32 def) -> uint32
+        {
+            uint32 v = sConfigMgr->GetOption<uint32>(key, def);
+            return (v < 60 ? 60 : v) * 1000u;
+        };
+
+        // Duración activa por tipo (segundos → ms)
+        const uint32 activeDur[4] = {
+            0u,
+            readMs("HotSpot.ActiveDuration.Invasion", 1800),
+            readMs("HotSpot.ActiveDuration.Mining",    900),
+            readMs("HotSpot.ActiveDuration.Herb",      900)
+        };
+
+        // Duración de cooldown por tipo (segundos → ms)
+        const uint32 cooldownDur[4] = {
+            0u,
+            readMs("HotSpot.CooldownDuration.Invasion", 3600),
+            readMs("HotSpot.CooldownDuration.Mining",   1800),
+            readMs("HotSpot.CooldownDuration.Herb",     1800)
+        };
+
+        _spotTimers.clear();
+        _activeDur.clear();
+        _cooldownDur.clear();
+
+        std::lock_guard<std::mutex> lock(_mutex);
+        for (auto& spot : hotspots)
+        {
+            if (!spot.rotate) continue;
+            if (spot.type == 0 || spot.type > 3) continue;
+
+            uint32 aD = activeDur[spot.type];
+            uint32 cD = cooldownDur[spot.type];
+            if (aD == 0 || cD == 0) continue;
+
+            _activeDur[spot.id]   = aD;
+            _cooldownDur[spot.id] = cD;
+
+            // Desactivar en BD y memoria; la rotación gestiona desde aquí
+            spot.active = false;
+            WorldDatabase.DirectExecute(
+                Acore::StringFormat("UPDATE mod_hotspot SET active = 0 WHERE id = {}", spot.id));
+
+            // Cooldown inicial aleatorio para escalonar activaciones naturalmente
+            SpotTimer st;
+            st.inCooldown = true;
+            st.timerMs    = urand(0, cD);
+            _spotTimers[spot.id] = st;
+
+            LOG_INFO("module",
+                "HotSpotRotation: spot {} [tipo {}] – activo {}s / cooldown {}s, "
+                "primera activación en ~{}s.",
+                spot.id, spot.type, aD / 1000, cD / 1000, st.timerMs / 1000);
+        }
+    }
+
+    void TickRotation(uint32 diff)
+    {
+        if (!sConfigMgr->GetOption<bool>("HotSpot.Enable", true) ||
+            !sConfigMgr->GetOption<bool>("HotSpot.AutoRotate.Enable", true))
+            return;
+
+        for (auto& [id, st] : _spotTimers)
+        {
+            if (st.timerMs > diff)
+            {
+                st.timerMs -= diff;
+                continue;
+            }
+
+            HotSpotData spot;
+            if (!GetById(id, spot)) continue;
+
+            if (st.inCooldown)
+            {
+                // Fin del cooldown → activar el spot
+                WorldDatabase.DirectExecute(
+                    Acore::StringFormat("UPDATE mod_hotspot SET active = 1 WHERE id = {}", id));
+                SetActive(id, true);
+                BroadcastActivation(spot);
+                st.inCooldown = false;
+                st.timerMs    = _activeDur[id];
+                LOG_INFO("module",
+                    "HotSpotRotation: spot {} [tipo {}] ACTIVADO (próximo cooldown en {}s).",
+                    id, spot.type, _activeDur[id] / 1000);
+            }
+            else
+            {
+                // Fin del período activo → desactivar el spot
+                WorldDatabase.DirectExecute(
+                    Acore::StringFormat("UPDATE mod_hotspot SET active = 0 WHERE id = {}", id));
+                SetActive(id, false);
+                BroadcastDeactivation(spot);
+                st.inCooldown = true;
+                st.timerMs    = _cooldownDur[id];
+                LOG_INFO("module",
+                    "HotSpotRotation: spot {} [tipo {}] DESACTIVADO (vuelve en {}s).",
+                    id, spot.type, _cooldownDur[id] / 1000);
+            }
+        }
+    }
+
+    // Helpers de anuncio (accesibles desde CommandScript)
+    static void BroadcastActivation(const HotSpotData& spot);
+    static void BroadcastDeactivation(const HotSpotData& spot);
+
 private:
+    // Timer independiente por spot (solo accedido desde el hilo del mundo)
+    struct SpotTimer {
+        uint32 timerMs{0};
+        bool   inCooldown{true};
+    };
+
     std::vector<HotSpotData> hotspots;
     mutable std::mutex _mutex;
+
+    std::unordered_map<uint32, SpotTimer> _spotTimers;  // spotId → timer
+    std::unordered_map<uint32, uint32>    _activeDur;   // spotId → ms activo
+    std::unordered_map<uint32, uint32>    _cooldownDur; // spotId → ms cooldown
 };
+
+// -----------------------------------------------------------------------
+// Implementaciones de los helpers de anuncio de HotSpotMgr
+// -----------------------------------------------------------------------
+
+static std::string HotSpot_GetZoneName(uint32 zoneId)
+{
+    if (zoneId == 0)
+        return "tierras desconocidas";
+
+    AreaTableEntry const* area = sAreaTableStore.LookupEntry(zoneId);
+    if (!area)
+        return Acore::StringFormat("zona {}", zoneId);
+
+    uint32 serverLocale = sWorld->GetDefaultDbcLocale();
+    uint32 checkOrder[] = { LOCALE_esES, LOCALE_esMX, serverLocale, LOCALE_enUS };
+    for (uint32 locale : checkOrder)
+        if (locale < MAX_LOCALES && area->area_name[locale] && *area->area_name[locale])
+            return area->area_name[locale];
+
+    return Acore::StringFormat("zona {}", zoneId);
+}
+
+static void HotSpot_Broadcast(const std::string& msg)
+{
+    WorldPacket data;
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_UNIVERSAL, nullptr, nullptr, msg);
+    sWorldSessionMgr->SendGlobalMessage(&data);
+}
+
+/*static*/ void HotSpotMgr::BroadcastActivation(const HotSpotData& spot)
+{
+    std::string z = HotSpot_GetZoneName(spot.zone_id);
+    std::string msg;
+    switch (spot.type)
+    {
+        case HOTSPOT_TYPE_INVASION:
+            msg = Acore::StringFormat(
+                "|cffff4444[ALERTA]|r |cffff8800¡Se ha avistado una invasión"
+                " atacando las tierras de {}!|r", z);
+            break;
+        case HOTSPOT_TYPE_MINING:
+            msg = Acore::StringFormat(
+                "|cffffff00[AVISO]|r |cff00ccff¡Exploradores han encontrado"
+                " una zona rica en Minerales en {}!|r", z);
+            break;
+        default:
+            msg = Acore::StringFormat(
+                "|cffffff00[AVISO]|r |cff55ff88¡Exploradores han encontrado"
+                " una zona rica en Hierbas en {}!|r", z);
+            break;
+    }
+    HotSpot_Broadcast(msg);
+}
+
+/*static*/ void HotSpotMgr::BroadcastDeactivation(const HotSpotData& spot)
+{
+    std::string z = HotSpot_GetZoneName(spot.zone_id);
+    std::string msg;
+    switch (spot.type)
+    {
+        case HOTSPOT_TYPE_INVASION:
+            msg = Acore::StringFormat(
+                "|cff00ff00[NOTICIA]|r |cffaaffaa¡La invasión en {} ha sido repelida!|r", z);
+            break;
+        case HOTSPOT_TYPE_MINING:
+            msg = Acore::StringFormat(
+                "|cffaaaaaa[AVISO]|r Los recursos minerales de {} se han agotado.|r", z);
+            break;
+        default:
+            msg = Acore::StringFormat(
+                "|cffaaaaaa[AVISO]|r Las hierbas de {} han sido recolectadas.|r", z);
+            break;
+    }
+    HotSpot_Broadcast(msg);
+}
 
 // -----------------------------------------------------------------------
 // Helpers de entradas de criaturas / objetos según nivel del jugador
@@ -417,7 +621,8 @@ public:
     static bool HandleHotSpotReloadCommand(ChatHandler* handler)
     {
         HotSpotMgr::instance()->LoadFromDB();
-        handler->SendSysMessage("Hot Spots recargados.");
+        HotSpotMgr::instance()->InitRotation();
+        handler->SendSysMessage("Hot Spots recargados (rotación reiniciada).");
         return true;
     }
 
@@ -518,6 +723,7 @@ public:
             radius, type, population));
 
         HotSpotMgr::instance()->LoadFromDB();
+        HotSpotMgr::instance()->InitRotation();
 
         const char* typeNames[] = { "", "Invasión", "Minería", "Herboristería" };
         handler->PSendSysMessage("Hot Spot de {} creado (radio {}, máx {} objetos).",
@@ -526,40 +732,7 @@ public:
     }
 
     // ── helpers de anuncios mundiales ────────────────────────────────────
-
-    // Devuelve el nombre de zona del DBC priorizando español.
-    // Orden: esES (6) → esMX (7) → locale del servidor → enUS (0).
-    // Así funciona correctamente aunque DBC.Locale esté en enUS.
-    static std::string GetZoneName(uint32 zoneId)
-    {
-        if (zoneId == 0)
-            return "tierras desconocidas";
-
-        AreaTableEntry const* area = sAreaTableStore.LookupEntry(zoneId);
-        if (!area)
-            return Acore::StringFormat("zona {}", zoneId);
-
-        uint32 serverLocale = sWorld->GetDefaultDbcLocale();
-        uint32 checkOrder[] = { LOCALE_esES, LOCALE_esMX, serverLocale, LOCALE_enUS };
-
-        for (uint32 locale : checkOrder)
-        {
-            if (locale < MAX_LOCALES &&
-                area->area_name[locale] && *area->area_name[locale])
-                return area->area_name[locale];
-        }
-
-        return Acore::StringFormat("zona {}", zoneId);
-    }
-
-    // Envía un mensaje de chat de sistema a TODOS los jugadores conectados.
-    static void BroadcastWorldAnnouncement(const std::string& msg)
-    {
-        WorldPacket data;
-        ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_UNIVERSAL,
-            nullptr, nullptr, msg);
-        sWorldSessionMgr->SendGlobalMessage(&data);
-    }
+    // (La lógica está en HotSpotMgr::BroadcastActivation/Deactivation)
 
     // .hotspot enable <id>  ─ activa un spot por ID (persiste en BD)
     static bool HandleHotSpotEnableCommand(ChatHandler* handler, uint32 id)
@@ -579,26 +752,15 @@ public:
             return true;
         }
 
+        if (spot.rotate)
+            handler->PSendSysMessage(
+                "|cffffff00[AVISO]|r Este spot tiene rotación automática; "
+                "la rotación puede desactivarlo en el próximo ciclo.");
+
         WorldDatabase.DirectExecute(Acore::StringFormat(
             "UPDATE mod_hotspot SET active = 1 WHERE id = {}", id));
         HotSpotMgr::instance()->SetActive(id, true);
-
-        // Anuncio mundial según tipo de spot
-        std::string zoneName = GetZoneName(spot.zone_id);
-        std::string announcement;
-        if (spot.type == HOTSPOT_TYPE_INVASION)
-            announcement = Acore::StringFormat(
-                "|cffff4444[ALERTA]|r |cffff8800¡Se ha avistado una invasión"
-                " atacando las tierras de {}!|r", zoneName);
-        else if (spot.type == HOTSPOT_TYPE_MINING)
-            announcement = Acore::StringFormat(
-                "|cffffff00[AVISO]|r |cff00ccff¡Exploradores han encontrado"
-                " una zona rica en Minerales en {}!|r", zoneName);
-        else
-            announcement = Acore::StringFormat(
-                "|cffffff00[AVISO]|r |cff55ff88¡Exploradores han encontrado"
-                " una zona rica en Hierbas en {}!|r", zoneName);
-        BroadcastWorldAnnouncement(announcement);
+        HotSpotMgr::BroadcastActivation(spot);
 
         handler->PSendSysMessage(
             "|cff00ff00Hot Spot {} [ID:{}] activado.|r",
@@ -629,23 +791,7 @@ public:
         WorldDatabase.DirectExecute(Acore::StringFormat(
             "UPDATE mod_hotspot SET active = 0 WHERE id = {}", id));
         HotSpotMgr::instance()->SetActive(id, false);
-
-        // Anuncio mundial según tipo de spot
-        std::string zoneName = GetZoneName(spot.zone_id);
-        std::string announcement;
-        if (spot.type == HOTSPOT_TYPE_INVASION)
-            announcement = Acore::StringFormat(
-                "|cff00ff00[NOTICIA]|r |cffaaffaa¡La invasión en {} ha sido repelida!|r",
-                zoneName);
-        else if (spot.type == HOTSPOT_TYPE_MINING)
-            announcement = Acore::StringFormat(
-                "|cffaaaaaa[AVISO]|r Los recursos minerales de {} se han agotado.|r",
-                zoneName);
-        else
-            announcement = Acore::StringFormat(
-                "|cffaaaaaa[AVISO]|r Las hierbas de {} han sido recolectadas.|r",
-                zoneName);
-        BroadcastWorldAnnouncement(announcement);
+        HotSpotMgr::BroadcastDeactivation(spot);
 
         handler->PSendSysMessage(
             "|cffff4444Hot Spot {} [ID:{}] desactivado.|r",
@@ -1136,7 +1282,17 @@ class HotSpotWorldScript : public WorldScript
 {
 public:
     HotSpotWorldScript() : WorldScript("HotSpotWorldScript") {}
-    void OnAfterConfigLoad(bool) override { HotSpotMgr::instance()->LoadFromDB(); }
+
+    void OnAfterConfigLoad(bool) override
+    {
+        HotSpotMgr::instance()->LoadFromDB();
+        HotSpotMgr::instance()->InitRotation();
+    }
+
+    void OnUpdate(uint32 diff) override
+    {
+        HotSpotMgr::instance()->TickRotation(diff);
+    }
 };
 
 void AddHotSpotScripts()
